@@ -4,12 +4,14 @@ import os
 from datetime import datetime
 import pandas as pd
 from io import BytesIO
+import plotly.express as px
 
 #############################
 #     INITIAL SETUP         #
 #############################
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DATA_DIR = "data"
+DATA_DIR = os.path.join(APP_DIR, "data")
 DAILY_STATE_DIR = os.path.join(DATA_DIR, "daily_state")
 WORKOUTS_DIR = os.path.join(DATA_DIR, "workouts")
 PROFILE_PATH = os.path.join(DATA_DIR, "athlete_profile.json")
@@ -417,8 +419,129 @@ with tabs[3]:
         st.subheader("Arquivos por modalidade")
         st.bar_chart(df["modality"].value_counts())
 
-        st.subheader("Médias gerais")
-        st.write(df.groupby("modality")[["perceived_exertion"]].describe())
+        st.subheader("Estatísticas por tipo de treino")
+        st.write(
+            df.groupby("modality")[["perceived_exertion", "carbs_session", "hydration_session"]]
+            .agg(['mean', 'std'])
+            .dropna(how="any")
+            .round(2)
+        )
+        
+        
+        # -------------------------------------
+        # 1. Carregar estados diários
+        # -------------------------------------
+        daily_states_files = sorted(os.listdir(DAILY_STATE_DIR))
+
+        daily_records = []
+        for f in daily_states_files:
+            path = os.path.join(DAILY_STATE_DIR, f)
+            data = load_json(path)
+            if data:
+                data["date"] = pd.to_datetime(f.replace(".json", ""))
+                daily_records.append(data)
+
+        df_daily = pd.DataFrame(daily_records)
+
+        if df_daily.empty:
+            st.warning("Nenhum estado diário registrado ainda.")
+            st.stop()
+
+        df_daily = df_daily.sort_values("date")
+
+        # ---------------------------
+        # 2. Filtro de período
+        # ---------------------------
+        st.subheader("Filtro de período")
+
+        period = st.selectbox(
+            "Período",
+            ["Últimos 7 dias", "Últimos 30 dias", "Últimos 90 dias", "Todo o período"]
+        )
+
+        today = df_daily["date"].max()
+
+        if period == "Últimos 7 dias":
+            df_filt = df_daily[df_daily["date"] >= today - pd.Timedelta(days=7)]
+        elif period == "Últimos 30 dias":
+            df_filt = df_daily[df_daily["date"] >= today - pd.Timedelta(days=30)]
+        elif period == "Últimos 90 dias":
+            df_filt = df_daily[df_daily["date"] >= today - pd.Timedelta(days=90)]
+        else:
+            df_filt = df_daily.copy()
+
+        
+
+        # ---------------------------
+        # 3. Seleção de métricas
+        # ---------------------------
+        cols_to_plot = [
+            "sleep_hours",
+            "sleep_quality",
+            "muscle_soreness",
+            "fatigue_score",
+            "mood_score",
+            "cgm_mean",
+            "time_in_range",
+            "hypo_events",
+            "psych_stress"
+        ]
+
+        cols_existing = [c for c in cols_to_plot if c in df_filt.columns]
+        if df_filt.empty or len(cols_existing) == 0:
+            st.warning("Nenhum dado disponível para o período selecionado.")
+        else:
+            # ---------------------------
+            # 4. Cálculo das estatísticas
+            # ---------------------------
+            stats = df_filt[cols_existing].agg(["mean", "std"]).T
+            stats["mean"] = stats["mean"].round(2)
+            stats["std"] = stats["std"].round(2)
+            stats["n"] = df_filt.shape[0]  # número de dias usados
+
+            #stats = stats.reset_index().rename(columns={"index": "metric"})
+
+            # ---------------------------
+            # 5. Gráfico Plotly
+            # ---------------------------
+            scores_1_5 = [
+                "sleep_quality",
+                "muscle_soreness",
+                "fatigue_score",
+                "mood_score",
+                "psych_stress"
+            ]
+
+            continuous_metrics = [
+                "sleep_hours",
+                "cgm_mean",
+                "time_in_range",
+                "hypo_events"
+            ]
+
+            # Scores 1–5 (bar chart with error bars)
+            stats_scores = stats.loc[scores_1_5].reset_index().rename(columns={"index": "metric"})
+            fig_scores = px.bar(
+                stats_scores,
+                x="metric",
+                y="mean",
+                error_y="std",
+                hover_data=["mean", "std", "n"],
+                title=f"Estatísticas do período selecionado ({stats_scores['n'].iloc[0]} dias)"
+            )
+            st.plotly_chart(fig_scores, use_container_width=True)
+            
+            # Filter stats to only the metrics we care about
+            stats_table = stats.loc[stats.index.intersection(continuous_metrics)].copy()
+
+            # Optional: format nicely
+            stats_table = stats_table.rename_axis("Metric").reset_index()
+            stats_table["mean"] = stats_table["mean"].round(2)
+            stats_table["std"] = stats_table["std"].round(2)
+
+            # Display in Streamlit
+            st.subheader("Continuous Metrics Summary")
+            st.dataframe(stats_table, use_container_width=True)
 
     else:
         st.info("Nenhum treino registrado ainda.")
